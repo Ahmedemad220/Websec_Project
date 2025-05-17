@@ -78,6 +78,10 @@ class UsersController extends Controller
                 ->withErrors('Your email is not verified.');
         }
 
+        // Update last login time
+        $user->last_login_at = now();
+        $user->save();
+
         Auth::setUser($user);
 
         return redirect('/');
@@ -113,52 +117,12 @@ class UsersController extends Controller
         return view('users.verified', compact('user'));
     }
 
-    public function profile(Request $request, User $user = null)
-    {
-        $user = $user ?? auth()->user();
-        if (auth()->id() != $user->id) {
-            if (!auth()->user()->hasPermissionTo('show_users'))
-                abort(401);
-        }
-
-        $permissions = [];
-        foreach ($user->permissions as $permission) {
-            $permissions[] = $permission;
-        }
-        foreach ($user->roles as $role) {
-            foreach ($role->permissions as $permission) {
-                $permissions[] = $permission;
-            }
-        }
-
-        return view('users.profile', compact('user', 'permissions'));
-    }
-
-    public function edit(Request $request, User $user = null)
-    {
-        $user = $user ?? auth()->user();
-
-
-        $roles = [];
-        foreach (Role::all() as $role) {
-            $role->taken = ($user->hasRole($role->name));
-            $roles[] = $role;
-        }
-
-        $permissions = [];
-        $directPermissionsIds = $user->permissions()->pluck('id')->toArray();
-        foreach (Permission::all() as $permission) {
-            $permission->taken = in_array($permission->id, $directPermissionsIds);
-            $permissions[] = $permission;
-        }
-
-        return view('users.edit', compact('user', 'roles', 'permissions'));
-    }
-
     public function save(Request $request, User $user)
     {
         $request->validate([
             'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255', 'unique:users,email,' . $user->id],
+            'address' => ['nullable', 'string', 'max:1000'],
             'roles' => ['array'],
             'permissions' => ['array'],
             'credit' => ['nullable', 'numeric', 'min:0']
@@ -166,6 +130,8 @@ class UsersController extends Controller
 
         $user->update([
             'name' => $request->name,
+            'email' => $request->email,
+            'address' => $request->address,
             'credit' => $request->credit ?? $user->credit,
         ]);
 
@@ -174,17 +140,10 @@ class UsersController extends Controller
             $user->syncPermissions($request->permissions);
         }
 
-        return redirect()->route('users')->with('success', 'User updated successfully.');
+        return redirect()->route('profile', ['user' => $user->id])->with('success', 'Profile updated successfully.');
     }
 
-    public function delete(Request $request, User $user)
-    {
-        if (!auth()->user()->hasPermissionTo('delete_users'))
-            abort(401);
-        $user->delete();
-        
-        return redirect()->route('users');
-    }
+
 
     public function editPassword(Request $request, User $user = null)
     {
@@ -197,57 +156,7 @@ class UsersController extends Controller
         return view('users.edit_password', compact('user'));
     }
 
-    public function savePassword(Request $request, User $user)
-    {
-        if (auth()->id() == $user?->id) {
-            $this->validate($request, [
-                'password' => ['required', 'confirmed', Password::min(8)->numbers()->letters()->mixedCase()->symbols()],
-            ]);
-
-            if (!Auth::attempt(['email' => $user->email, 'password' => $request->old_password])) {
-                Auth::logout();
-                return redirect('/');
-            }
-        } else if (!auth()->user()->hasPermissionTo('edit_users')) {
-            abort(401);
-        }
-
-        $user->password = bcrypt($request->password);
-        $user->save();
-
-        return redirect(route('profile', ['user' => $user->id]));
-    }
-
-
-    public function showUsersByRole(Request $request)
-    {
-        if (!auth()->user()->hasPermissionTo('show_users'))
-            abort(403);
-
-        $role = $request->get('role');
-
-        $query = User::query();
-
-        if ($role) {
-            $query->role($role);
-        }
-
-        $users = $query->get();
-
-        return view('users.by_role', compact('users', 'role'));
-    }
-
-    public function showCredit()
-    {
-        $user = auth()->user();
-        return view('users.credit', compact('user'));
-    }
-
-    public function create()
-    {
-        $roles = Role::all();
-        return view('users.create', compact('roles'));
-    }
+    
 
     public function store(Request $request)
     {
@@ -270,55 +179,8 @@ class UsersController extends Controller
         return redirect()->route('users')->with('success', 'User created successfully.');
     }
 
-    public function listCustomers()
-    {
-        $customers = User::role('Customer')->get();
 
-        return view('users.list-customer', compact('customers'));
-    }
 
-    public function chargeCredit(Request $request, $id)
-    {
-        $validated = $request->validate([
-            'credit' => 'required|numeric|min:0.01',
-        ]);
-
-        $customer = User::findOrFail($id);
-
-        $customer->credit += $validated['credit'];
-        $customer->save();
-
-        return redirect()->route('customers.list')->with('success', 'Credit charged successfully.');
-    }
-
-    public function redirectToGoogle()
-    {
-        return Socialite::driver('google')->redirect();
-    }
-
-    public function handleGoogleCallback()
-    {
-        try {
-            $googleUser = Socialite::driver('google')->user();
-
-            $user = User::where('email', $googleUser->getEmail())->first();
-
-            if (!$user) {
-                $user = User::create([
-                    'name' => $googleUser->getName(),
-                    'email' => $googleUser->getEmail(),
-                    'email_verified_at' => now(),
-                    'password' => bcrypt(uniqid()), 
-                ]);
-                $user->assignRole('customer'); 
-            }
-
-            Auth::login($user);
-            return redirect('/');
-        } catch (\Exception $e) {
-            return redirect('/login')->withErrors('Unable to login using Google.');
-        }
-    }
 
     public function showForgotForm()
 {
@@ -378,36 +240,119 @@ public function resetPassword(Request $request)
     return redirect()->route('login')->with('success', 'Your password has been reset successfully!');
 }
 
+public function list(Request $request)
+{
+    if (!auth()->user()->hasPermissionTo('show_users'))
+        abort(401);
 
-    public function redirectToGithub()
-    {
-        return Socialite::driver('github')->redirect();
+    $query = User::select('*');
+    
+    // Apply search filter
+    $query->when($request->keywords, function($q) use ($request) {
+        $q->where(function($query) use ($request) {
+            $query->where('name', 'like', "%{$request->keywords}%")
+                  ->orWhere('email', 'like', "%{$request->keywords}%");
+        });
+    });
+
+    // Apply role filter
+    $query->when($request->role, function($q) use ($request) {
+        $q->whereHas('roles', function($query) use ($request) {
+            $query->where('name', $request->role);
+        });
+    });
+
+    // Get paginated results
+    $users = $query->paginate(10)->withQueryString();
+
+    // Get all roles for the filter dropdown
+    $roles = Role::all();
+
+    return view('users.list', compact('users', 'roles'));
+}
+
+public function profile(Request $request, User $user = null)
+{
+    $user = $user ?? auth()->user();
+    if (auth()->id() != $user->id) {
+        if (!auth()->user()->hasPermissionTo('show_users'))
+            abort(401);
     }
 
-    public function handleGithubCallback()
-    {
-        try {
-            $githubUser = Socialite::driver('github')->stateless()->user();
-
-            $user = User::where('email', $githubUser->getEmail())->first();
-
-            if (!$user) {
-                $user = User::create([
-                    'name' => $githubUser->getName() ?? $githubUser->getNickname(),
-                    'email' => $githubUser->getEmail(),
-                    'email_verified_at' => now(),
-                    'password' => bcrypt(uniqid()),
-                ]);
-                $user->assignRole('customer');
-            }
-
-            Auth::login($user);
-
-            return redirect('/')->with('success', 'Logged in successfully using GitHub!');
-        } catch (\Exception $e) {
-            return redirect('/login')->withErrors('Unable to login using GitHub.');
+    $permissions = [];
+    foreach ($user->permissions as $permission) {
+        $permissions[] = $permission;
+    }
+    foreach ($user->roles as $role) {
+        foreach ($role->permissions as $permission) {
+            $permissions[] = $permission;
         }
     }
+
+    return view('users.profile', compact('user', 'permissions'));
+}
+
+public function edit(Request $request, User $user = null)
+{
+    $user = $user ?? auth()->user();
+
+
+    $roles = [];
+    foreach (Role::all() as $role) {
+        $role->taken = ($user->hasRole($role->name));
+        $roles[] = $role;
+    }
+
+    $permissions = [];
+    $directPermissionsIds = $user->permissions()->pluck('id')->toArray();
+    foreach (Permission::all() as $permission) {
+        $permission->taken = in_array($permission->id, $directPermissionsIds);
+        $permissions[] = $permission;
+    }
+
+    return view('users.edit', compact('user', 'roles', 'permissions'));
+}
+
+public function delete(Request $request, User $user)
+{
+    if (!auth()->user()->hasPermissionTo('delete_users'))
+        abort(401);
+    $user->delete();
+    
+    return redirect()->route('users');
+}
+
+
+
+
+public function savePassword(Request $request, User $user)
+{
+    if (auth()->id() == $user?->id) {
+        $this->validate($request, [
+            'password' => ['required', 'confirmed', Password::min(8)->numbers()->letters()->mixedCase()->symbols()],
+        ]);
+
+        if (!Auth::attempt(['email' => $user->email, 'password' => $request->old_password])) {
+            Auth::logout();
+            return redirect('/');
+        }
+    } else if (!auth()->user()->hasPermissionTo('edit_users')) {
+        abort(401);
+    }
+
+    $user->password = bcrypt($request->password);
+    $user->save();
+
+    return redirect(route('profile', ['user' => $user->id]));
+}
+
+
+public function create()
+{
+    $roles = Role::all();
+    return view('users.create', compact('roles'));
+}
+
 }
 
 
